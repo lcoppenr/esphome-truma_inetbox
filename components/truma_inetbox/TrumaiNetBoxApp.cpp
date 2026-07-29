@@ -88,6 +88,12 @@ void TrumaiNetBoxApp::lin_reset_device() {
 bool TrumaiNetBoxApp::answer_lin_order_(const uint8_t pid) {
   // Alive message
   if (pid == LIN_PID_TRUMA_INET_BOX) {
+    // LOCAL PATCH #7: an answered PID 18 poll proves CP Plus is servicing us
+    // on the bus, so stamp it as "alive". CP Plus's idle state (2-36 min, no
+    // heartbeats, PID 18 polling continues) otherwise reads as dead even
+    // though the link is fine. Heartbeats still re-stamp via lin_heartbeat().
+    this->device_registered_ = micros();
+
     std::array<uint8_t, 8> response = this->lin_empty_response_;
 
     if (this->updates_to_send_.empty() && !this->has_update_to_submit_()) {

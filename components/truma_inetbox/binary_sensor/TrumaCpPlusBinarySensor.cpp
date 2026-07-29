@@ -12,8 +12,11 @@ void TrumaCpPlusBinarySensor::update() {
     this->publish_state(false);
     return;
   }
-  const auto timeout = this->parent_->get_last_cp_plus_request() + 90 * 1000 * 1000 /* 90 seconds*/;
-  this->publish_state(micros() < timeout);
+  // LOCAL PATCH #7: unsigned delta so the micros() uint32 wrap (every
+  // ~71.6 min) can't produce a false "alive"; 150 s window because CP Plus
+  // heartbeat gaps routinely reach 121 s in its active state.
+  const uint32_t since_last = micros() - (uint32_t) this->parent_->get_last_cp_plus_request();
+  this->publish_state(since_last < 150 * 1000 * 1000 /* 150 seconds*/);
 }
 
 void TrumaCpPlusBinarySensor::dump_config() { LOG_BINARY_SENSOR("", "Truma CP Plus Binary Sensor", this); }
