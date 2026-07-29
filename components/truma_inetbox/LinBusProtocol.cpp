@@ -32,6 +32,13 @@ bool LinBusProtocol::answer_lin_order_(const uint8_t pid) {
     if (!this->updates_to_send_.empty()) {
       auto update_to_send_ = this->updates_to_send_.front();
       this->updates_to_send_.pop();
+      // LOCAL PATCH #8 (observability): queue depth + NAD/PCI identify each
+      // 3D answer (PCI 0x0X single, 0x1X first, 0x2X consecutive) so a
+      // stale/misaligned queue is visible when CP Plus rejects a transfer
+      // with ResponseAck INVALID_MSG.
+      ESP_LOGD(TAG, "3D answer: depth %u->%u, NAD/PCI %02X %02X",
+               (unsigned) this->updates_to_send_.size() + 1, (unsigned) this->updates_to_send_.size(),
+               update_to_send_[0], update_to_send_[1]);
       this->write_lin_answer_(update_to_send_.data(), (uint8_t) update_to_send_.size());
       return true;
     }

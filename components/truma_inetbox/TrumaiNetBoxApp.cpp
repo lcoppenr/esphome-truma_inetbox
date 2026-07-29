@@ -98,6 +98,11 @@ bool TrumaiNetBoxApp::answer_lin_order_(const uint8_t pid) {
 
     if (this->updates_to_send_.empty() && !this->has_update_to_submit_()) {
       response[0] = 0xFE;
+    } else {
+      // LOCAL PATCH #8 (observability): visible whenever this answer
+      // advertises pending data to CP Plus (~once per 5 s while pending).
+      ESP_LOGD(TAG, "PID 18 answer advertising pending data (queue %u)",
+               (unsigned) this->updates_to_send_.size());
     }
     this->write_lin_answer_(response.data(), (uint8_t) sizeof(response));
     return true;
