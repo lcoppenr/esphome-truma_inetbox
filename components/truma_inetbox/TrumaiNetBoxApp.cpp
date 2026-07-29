@@ -38,7 +38,8 @@ void TrumaiNetBoxApp::update() {
   // - Update was not done
   // - 30 seconds after init data recieved
   if (this->time_ != nullptr && !this->update_status_clock_done && this->init_recieved_ > 0) {
-    if (micros() > ((30 * 1000 * 1000) + this->init_recieved_ /* 30 seconds after init recieved */)) {
+    // Wrap-safe: unsigned delta (micros() wraps every ~71.6 min).
+    if ((uint32_t) (micros() - this->init_recieved_) > (30 * 1000 * 1000) /* 30 seconds after init recieved */) {
       this->update_status_clock_done = true;
       this->clock_.action_write_time();
     }
@@ -96,15 +97,20 @@ bool TrumaiNetBoxApp::answer_lin_order_(const uint8_t pid) {
 
     std::array<uint8_t, 8> response = this->lin_empty_response_;
 
-    if (this->updates_to_send_.empty() && !this->has_update_to_submit_()) {
+    bool advertising = true;
+    if (this->updates_to_send_pending_() == 0 && !this->has_update_to_submit_()) {
       response[0] = 0xFE;
-    } else {
-      // LOCAL PATCH #8 (observability): visible whenever this answer
-      // advertises pending data to CP Plus (~once per 5 s while pending).
-      ESP_LOGD(TAG, "PID 18 answer advertising pending data (queue %u)",
-               (unsigned) this->updates_to_send_.size());
+      advertising = false;
     }
     this->write_lin_answer_(response.data(), (uint8_t) sizeof(response));
+    if (advertising) {
+      // LOCAL PATCH #8 (observability): visible whenever this answer
+      // advertises pending data to CP Plus (~once per 5 s while pending).
+      // Logged AFTER the answer: logging is blocking (especially WiFi
+      // logging) and must not delay the LIN response out of its ~1 ms slot.
+      ESP_LOGD(TAG, "PID 18 answer advertising pending data (queue %u)",
+               (unsigned) this->updates_to_send_pending_());
+    }
     return true;
   }
   return LinBusProtocol::answer_lin_order_(pid);

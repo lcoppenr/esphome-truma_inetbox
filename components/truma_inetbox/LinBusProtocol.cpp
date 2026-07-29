@@ -21,25 +21,46 @@ static const char *const TAG = "truma_inetbox.LinBusProtocol";
 
 void LinBusProtocol::lin_reset_device(){
     // clear any messages in send queue of LinBus Protocol handler.
+  LockGuard lock(this->updates_to_send_mutex_);
   while (!this->updates_to_send_.empty()) {
     this->updates_to_send_.pop();
   }
 }
 
+size_t LinBusProtocol::updates_to_send_pending_() {
+  LockGuard lock(this->updates_to_send_mutex_);
+  return this->updates_to_send_.size();
+}
+
+bool LinBusProtocol::updates_to_send_pop_(std::array<uint8_t, 8> *out, size_t *depth_after) {
+  LockGuard lock(this->updates_to_send_mutex_);
+  if (this->updates_to_send_.empty()) {
+    return false;
+  }
+  *out = this->updates_to_send_.front();
+  this->updates_to_send_.pop();
+  if (depth_after != nullptr) {
+    *depth_after = this->updates_to_send_.size();
+  }
+  return true;
+}
+
 bool LinBusProtocol::answer_lin_order_(const uint8_t pid) {
   // Send requested answer
   if (pid == DIAGNOSTIC_FRAME_SLAVE) {
-    if (!this->updates_to_send_.empty()) {
-      auto update_to_send_ = this->updates_to_send_.front();
-      this->updates_to_send_.pop();
+    std::array<uint8_t, 8> update_to_send_;
+    size_t depth_after = 0;
+    if (this->updates_to_send_pop_(&update_to_send_, &depth_after)) {
+      this->write_lin_answer_(update_to_send_.data(), (uint8_t) update_to_send_.size());
       // LOCAL PATCH #8 (observability): queue depth + NAD/PCI identify each
       // 3D answer (PCI 0x0X single, 0x1X first, 0x2X consecutive) so a
       // stale/misaligned queue is visible when CP Plus rejects a transfer
-      // with ResponseAck INVALID_MSG.
+      // with ResponseAck INVALID_MSG. Logged AFTER the answer: logging is
+      // blocking (especially WiFi logging) and must not delay the LIN
+      // response out of its ~1 ms slot.
       ESP_LOGD(TAG, "3D answer: depth %u->%u, NAD/PCI %02X %02X",
-               (unsigned) this->updates_to_send_.size() + 1, (unsigned) this->updates_to_send_.size(),
+               (unsigned) depth_after + 1, (unsigned) depth_after,
                update_to_send_[0], update_to_send_[1]);
-      this->write_lin_answer_(update_to_send_.data(), (uint8_t) update_to_send_.size());
       return true;
     }
   }
