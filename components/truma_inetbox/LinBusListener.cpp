@@ -150,6 +150,45 @@ void LinBusListener::write_lin_answer_(const uint8_t *data, uint8_t len) {
     this->current_PID_order_answered_ = true;
     this->write_array(data, len);
     this->write(data_CRC);
+    // LOCAL PATCH (phantom "unable to send response" fix): consume our own TX
+    // echo synchronously instead of leaving it for the loop-driven parser.
+    // The transceiver loops TXD back onto RXD, so the echo arrives over the
+    // next ~10 ms (9 bytes at 9600 baud) - but on_receive_()'s gap-based
+    // resync treats any >~1.5 ms RX gap as a frame boundary, so whenever the
+    // main loop lags it discards the echo as garbage and the BREAK-state
+    // check logs "unable to send response" even though the answer was
+    // transmitted fine. Draining the echo here (bounded ~14 ms, only on the
+    // ~2 answered PIDs per second) makes the accounting deterministic and
+    // byte-verifies the answer really hit the bus.
+    const uint8_t expected = len + 1;  // data bytes + checksum
+    uint8_t echo_count = 0;
+    bool echo_ok = true;
+    const uint32_t deadline = micros() + ((uint32_t) expected + 2) * this->time_per_byte_;
+    while (echo_count < expected && (int32_t) (deadline - micros()) > 0) {
+      uint8_t echo_buf;
+      // PATCH #6: direct non-blocking driver read — this runs in the reader
+      // task, which is the only UART consumer.
+      if (uart_read_bytes(static_cast<uart_port_t>(this->uart_num_), &echo_buf, 1, 0) == 1) {
+        const uint8_t sent = echo_count < len ? data[echo_count] : data_CRC;
+        if (echo_buf != sent) {
+          echo_ok = false;
+        }
+        echo_count++;
+      }
+    }
+    if (echo_count == expected && echo_ok) {
+      // Mark the frame complete so the BREAK-state "unanswered order" check
+      // passes; the next master frame resyncs the state machine as usual.
+      this->current_data_count_ = expected;
+      this->last_data_recieved_ = micros();
+      ESP_LOGD(TAG, "Answered PID %02X, echo verified (%u bytes)", this->current_PID_, (unsigned) expected);
+    } else {
+      // Leave the counters untouched: the BREAK-state check will log
+      // "unable to send response" - now meaning a genuine TX failure
+      // (no/incomplete echo) or a bus collision (echo mismatch).
+      ESP_LOGW(TAG, "PID %02X echo %s (%u/%u bytes)", this->current_PID_,
+               echo_ok ? "incomplete" : "MISMATCH", (unsigned) echo_count, (unsigned) expected);
+    }
   }
 
   log_msg.type = QUEUE_LOG_MSG_TYPE::VERBOSE_LIN_ANSWER_RESPONSE;
