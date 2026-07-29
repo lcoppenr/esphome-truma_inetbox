@@ -1,5 +1,38 @@
 # ESPHome truma_inetbox component
 
+> **Van fork (lcoppenr).** This fork carries the patches running on our
+> Winnebago Solis's `bro-truma` ESP32-S3 (Truma VarioHeat + CP Plus,
+> panel 5.07.01/0301). Base: upstream `skrebber/esphome-truma_inetbox`
+> @ `ba64dabc451754c8c226785bcc4d2e728f65faaf` ("Changes according to
+> ESPHome 2026.4.0"). Branch `van-patches`, one commit per patch:
+>
+> 1. `automation.h` — ESPHome 2026.6 Action API compat (`const Ts &...x`).
+> 2. `LinBusListener` — dedicated high-priority UART reader task (ESP-IDF),
+>    deterministic <1 ms LIN answer latency; ~11 ms resync threshold;
+>    DATA-timeout byte reprocessed instead of dropped.
+> 3. `LinBusListener` — synchronous TX echo drain + byte-verify in
+>    `write_lin_answer_` (kills phantom "unable to send response").
+> 4. `TrumaiNetBoxAppClock.h` — `can_update()` unconditional (VarioHeat CP
+>    Plus never sends StatusFrameClock; frame is built from ESP time).
+> 5. `climate/TrumaRoomClimate` — real-thermostat behavior with remembered
+>    setpoint (no NaN target while off, resume at saved setpoint, no double
+>    LIN action on combined temp+mode calls).
+> 6. CP Plus alive sensor — wrap-safe micros() delta, 150 s window, stamped
+>    on every answered PID 18 poll.
+> 7. DEBUG observability probes for the update-fetch reject/starvation hunt
+>    (still open).
+>
+> Consume pinned by commit SHA:
+>
+> ```yaml
+> external_components:
+>   - source:
+>       type: git
+>       url: https://github.com/lcoppenr/esphome-truma_inetbox
+>       ref: <full-commit-sha>
+>     components: [truma_inetbox]
+> ```
+
 ## Changes according to ESPHome 2026.4.0
 This release fixes two independent issues exposed by ESPHome 2026.4.0:
 Compile failures due to changes in TEMPLATABLE_VALUE handling of enums.
