@@ -150,6 +150,7 @@ void LinBusListener::write_lin_answer_(const uint8_t *data, uint8_t len) {
     this->current_PID_order_answered_ = true;
     this->write_array(data, len);
     this->write(data_CRC);
+#ifdef USE_ESP32_FRAMEWORK_ESP_IDF
     // LOCAL PATCH (phantom "unable to send response" fix): consume our own TX
     // echo synchronously instead of leaving it for the loop-driven parser.
     // The transceiver loops TXD back onto RXD, so the echo arrives over the
@@ -189,6 +190,7 @@ void LinBusListener::write_lin_answer_(const uint8_t *data, uint8_t len) {
       ESP_LOGW(TAG, "PID %02X echo %s (%u/%u bytes)", this->current_PID_,
                echo_ok ? "incomplete" : "MISMATCH", (unsigned) echo_count, (unsigned) expected);
     }
+#endif  // USE_ESP32_FRAMEWORK_ESP_IDF
   }
 
   log_msg.type = QUEUE_LOG_MSG_TYPE::VERBOSE_LIN_ANSWER_RESPONSE;
@@ -197,7 +199,7 @@ void LinBusListener::write_lin_answer_(const uint8_t *data, uint8_t len) {
     log_msg.data[i] = data[i];
   }
   log_msg.data[len] = data_CRC;
-  log_msg.len = len++;
+  log_msg.len = len + 1;  // data bytes + CRC (was `len++`, which logged the old value and dropped the CRC byte)
   TRUMA_LOGV(log_msg);
 }
 
@@ -315,7 +317,8 @@ void LinBusListener::read_lin_frame_(uint8_t buf) {
 
     case READ_STATE_DATA: {
       auto current = micros();
-      if (current > (this->last_data_recieved_ + this->time_per_first_byte_)) {
+      // Wrap-safe: unsigned delta (micros() wraps every ~71.6 min).
+      if ((uint32_t) (current - this->last_data_recieved_) > this->time_per_first_byte_) {
         // Timeout: this byte belongs to a NEW frame. Reprocess it from BREAK
         // state instead of dropping it — the loop-driven version left it in
         // the FIFO, but here it's already in hand; dropping it corrupted the
