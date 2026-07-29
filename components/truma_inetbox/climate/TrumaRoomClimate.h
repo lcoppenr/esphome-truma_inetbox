@@ -28,6 +28,11 @@ namespace esphome {
     float visual_min_temperature_{5.0};
     float visual_max_temperature_{30.0};
     float visual_temperature_step_{0.5};
+    // Last known/requested room setpoint (°C). Published while the heater is
+    // off so HA always has a target (real-thermostat behavior); used to resume
+    // heating at the previous setpoint instead of the 5°C minimum. Not
+    // persisted: resets to 21°C after an ESP reboot until the next heat cycle.
+    float saved_target_{21.0f};
   };
   
   }  // namespace truma_inetbox

@@ -7,10 +7,17 @@ namespace truma_inetbox {
 static const char *const TAG = "truma_inetbox.room_climate";
 void TrumaRoomClimate::setup() {
   this->parent_->get_heater()->add_on_message_callback([this](const StatusFrameHeater *status_heater) {
-    // Publish updated state
-    this->target_temperature = temp_code_to_decimal(status_heater->target_temp_room);
+    // Publish updated state. While the heater is off the CP Plus reports no
+    // target (TARGET_TEMP_OFF -> NaN); keep publishing the saved setpoint so
+    // the entity always carries a target temperature like a real thermostat.
+    float reported_target = temp_code_to_decimal(status_heater->target_temp_room);
+    bool heater_off = std::isnan(reported_target);
+    if (!heater_off) {
+      this->saved_target_ = reported_target;
+    }
+    this->target_temperature = heater_off ? this->saved_target_ : reported_target;
     this->current_temperature = temp_code_to_decimal(status_heater->current_temp_room);
-    this->mode = std::isnan(this->target_temperature) ? climate::CLIMATE_MODE_OFF : climate::CLIMATE_MODE_HEAT;
+    this->mode = heater_off ? climate::CLIMATE_MODE_OFF : climate::CLIMATE_MODE_HEAT;
 
     switch (status_heater->heating_mode) {
       case HeatingMode::HEATING_MODE_ECO:
@@ -50,7 +57,19 @@ void TrumaRoomClimate::dump_config() { LOG_CLIMATE(TAG, "Truma Room Climate", th
 void TrumaRoomClimate::control(const climate::ClimateCall &call) {
   if (call.get_target_temperature().has_value() && !call.get_fan_mode().has_value()) {
     float temp = *call.get_target_temperature();
-    this->parent_->get_heater()->action_heater_room(static_cast<uint8_t>(temp));
+    this->saved_target_ = temp;
+    auto status_heater = this->parent_->get_heater()->get_status();
+    bool heater_off = status_heater->target_temp_room == TargetTemp::TARGET_TEMP_OFF;
+    bool wants_heat = call.get_mode().has_value() && *call.get_mode() == climate::CLIMATE_MODE_HEAT;
+    if (!heater_off || wants_heat) {
+      this->parent_->get_heater()->action_heater_room(static_cast<uint8_t>(temp));
+    } else {
+      // Heater is off and this call doesn't turn it on: store the setpoint
+      // only (real-thermostat behavior) — adjusting the target must never
+      // ignite the furnace.
+      this->target_temperature = temp;
+      this->publish_state();
+    }
   }
 
   if (call.get_mode().has_value()) {
@@ -59,8 +78,12 @@ void TrumaRoomClimate::control(const climate::ClimateCall &call) {
     auto status_heater = this->parent_->get_heater()->get_status();
     switch (mode) {
       case climate::CLIMATE_MODE_HEAT:
-        if (status_heater->target_temp_room == TargetTemp::TARGET_TEMP_OFF) {
-          this->parent_->get_heater()->action_heater_room(5);
+        // Resume at the saved setpoint instead of the 5°C minimum. Skip when
+        // the call also carried a target temperature — the branch above
+        // already sent the action (sending twice would race on the LIN bus).
+        if (status_heater->target_temp_room == TargetTemp::TARGET_TEMP_OFF &&
+            !call.get_target_temperature().has_value()) {
+          this->parent_->get_heater()->action_heater_room(static_cast<uint8_t>(this->saved_target_));
         }
         break;
       default:
@@ -73,8 +96,13 @@ void TrumaRoomClimate::control(const climate::ClimateCall &call) {
     auto fan_mode = *call.get_fan_mode();
     auto status_heater = this->parent_->get_heater()->get_status();
     float temp = temp_code_to_decimal(status_heater->target_temp_room, 0);
+    if (temp <= 0) {
+      // Heater currently off: resume at the saved setpoint, not the minimum.
+      temp = this->saved_target_;
+    }
     if (call.get_target_temperature().has_value()) {
       temp = *call.get_target_temperature();
+      this->saved_target_ = temp;
     }
     switch (fan_mode) {
       case climate::CLIMATE_FAN_LOW:
