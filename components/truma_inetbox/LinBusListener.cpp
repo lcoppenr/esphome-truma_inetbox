@@ -3,6 +3,10 @@
 #include "esphome/core/log.h"
 #include "helpers.h"
 
+#ifdef USE_ESP32_FRAMEWORK_ESP_IDF
+#include <driver/uart.h>
+#endif
+
 namespace esphome {
 namespace truma_inetbox {
 
@@ -67,21 +71,51 @@ void LinBusListener::setup() {
   }
 }
 
-void LinBusListener::update() { this->check_for_lin_fault_(); }
+// PATCH #6: fault polling and all UART I/O now live in the reader task, which
+// is the sole UART consumer. loop() only drains the queues the task fills.
+void LinBusListener::update() {}
 
 void LinBusListener::loop() {
-  if (!this->check_for_lin_fault_()) {
-    if (this->available() > 0) {
-      this->on_receive_();
-    }
-  }
-
   this->process_lin_msg_queue(QUEUE_WAIT_DONT_BLOCK);
 
 #if ESPHOME_LOG_LEVEL > ESPHOME_LOG_LEVEL_NONE
   this->process_log_queue(QUEUE_WAIT_DONT_BLOCK);
 #endif  // ESPHOME_LOG_LEVEL > ESPHOME_LOG_LEVEL_NONE
 }
+
+#ifdef USE_ESP32_FRAMEWORK_ESP_IDF
+void LinBusListener::read_task_trampoline(void *param) {
+  static_cast<LinBusListener *>(param)->read_task_loop_();
+}
+
+void LinBusListener::read_task_loop_() {
+  const uart_port_t uart_num = static_cast<uart_port_t>(this->uart_num_);
+  while (true) {
+    if (this->check_for_lin_fault_()) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    uint8_t buf;
+    // Block in the driver until a byte arrives (rx_full_threshold is 1);
+    // the timeout just lets the fault check run while the bus is quiet.
+    if (uart_read_bytes(uart_num, &buf, 1, pdMS_TO_TICKS(50)) == 1) {
+      const uint32_t now = micros();
+      // No UART_BREAK event on the modern API: treat a long RX gap as a frame
+      // boundary. IMPORTANT: this task sees true wire timing (the loop-driven
+      // version saw FIFO-batch timing where gaps ~0), so intra-frame pauses —
+      // e.g. the LIN response space between the SID and the answer bytes —
+      // are real here and MUST NOT reset the parser. Inter-frame idle is tens
+      // of ms; 2× the first-byte timeout (~11 ms) separates the two cleanly.
+      if (this->last_data_recieved_ != 0 &&
+          (now - this->last_data_recieved_) > (this->time_per_first_byte_ * 2)) {
+        this->current_state_ = READ_STATE_BREAK;
+      }
+      this->read_lin_frame_(buf);
+      this->last_data_recieved_ = micros();
+    }
+  }
+}
+#endif  // USE_ESP32_FRAMEWORK_ESP_IDF
 
 void LinBusListener::write_lin_answer_(const uint8_t *data, uint8_t len) {
   QUEUE_LOG_MSG log_msg = QUEUE_LOG_MSG();
@@ -163,24 +197,7 @@ bool LinBusListener::check_for_lin_fault_() {
   }
 }
 
-void LinBusListener::on_receive_() {
-  while (this->available()) {
-    const uint32_t now = micros();
-
-    // ESPHome 2026 no longer gives this component a UART event queue / UART_BREAK event.
-    // Re-sync the LIN parser by treating a sufficiently long RX gap as a new frame boundary.
-    if (this->last_data_recieved_ != 0 &&
-        (now - this->last_data_recieved_) > this->time_per_lin_break_) {
-      this->current_state_ = READ_STATE_BREAK;
-    }
-
-    this->read_lin_frame_();
-    this->last_data_recieved_ = micros();
-  }
-}
-
-void LinBusListener::read_lin_frame_() {
-  uint8_t buf;
+void LinBusListener::read_lin_frame_(uint8_t buf) {
   QUEUE_LOG_MSG log_msg = QUEUE_LOG_MSG();
 
   switch (this->current_state_) {
@@ -208,7 +225,7 @@ void LinBusListener::read_lin_frame_() {
 
       // First is Break expected.
       // Some setups expose the break as 0x00, others only let us see the following sync.
-      if (!this->read_byte(&buf) || (buf != LIN_BREAK && buf != LIN_SYNC)) {
+      if (buf != LIN_BREAK && buf != LIN_SYNC) {
         log_msg.type = QUEUE_LOG_MSG_TYPE::VV_READ_LIN_FRAME_BREAK_EXPECTED;
         log_msg.current_PID = buf;
         TRUMA_LOGVV_ISR(log_msg);
@@ -223,7 +240,7 @@ void LinBusListener::read_lin_frame_() {
 
     case READ_STATE_SYNC:
       // Second is Sync expected
-      if (!this->read_byte(&buf) || buf != LIN_SYNC) {
+      if (buf != LIN_SYNC) {
         log_msg.type = QUEUE_LOG_MSG_TYPE::VV_READ_LIN_FRAME_SYNC_EXPECTED;
         log_msg.current_PID = buf;
         TRUMA_LOGVV_ISR(log_msg);
@@ -234,7 +251,7 @@ void LinBusListener::read_lin_frame_() {
       break;
 
     case READ_STATE_SID:
-      this->read_byte(&(this->current_PID_with_parity_));
+      this->current_PID_with_parity_ = buf;
       this->current_PID_ = this->current_PID_with_parity_ & 0x3F;
       if (this->lin_checksum_ == LIN_CHECKSUM::LIN_CHECKSUM_VERSION_2) {
         if (this->current_PID_with_parity_ != (this->current_PID_ | (addr_parity(this->current_PID_) << 6))) {
@@ -260,11 +277,14 @@ void LinBusListener::read_lin_frame_() {
     case READ_STATE_DATA: {
       auto current = micros();
       if (current > (this->last_data_recieved_ + this->time_per_first_byte_)) {
-        // timeout occurred.
+        // Timeout: this byte belongs to a NEW frame. Reprocess it from BREAK
+        // state instead of dropping it — the loop-driven version left it in
+        // the FIFO, but here it's already in hand; dropping it corrupted the
+        // next frame ("partial data received").
         this->current_state_ = READ_STATE_BREAK;
+        this->read_lin_frame_(buf);
         return;
       }
-      this->read_byte(&buf);
       this->current_data_[this->current_data_count_] = buf;
       this->current_data_count_++;
 
@@ -340,6 +360,12 @@ void LinBusListener::read_lin_frame_() {
 }
 
 void LinBusListener::clear_uart_buffer_() {
+#ifdef USE_ESP32_FRAMEWORK_ESP_IDF
+  if (this->uart_num_ >= 0) {
+    uart_flush_input(static_cast<uart_port_t>(this->uart_num_));
+    return;
+  }
+#endif
   uint8_t buffer;
   while (this->available() && this->read_byte(&buffer)) {
   }

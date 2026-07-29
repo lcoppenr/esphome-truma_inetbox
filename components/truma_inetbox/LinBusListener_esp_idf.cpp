@@ -21,9 +21,10 @@ static const char *const TAG = "truma_inetbox.LinBusListener";
 void LinBusListener::setup_framework() {
   auto *uart_comp = static_cast<ESPHOME_UART *>(this->parent_);
   uart_port_t uart_num = static_cast<uart_port_t>(uart_comp->get_hw_serial_number());
+  this->uart_num_ = uart_num;
 
-  // Keep receive latency low so ESPHome's loop wakeup sees bytes immediately.
-  // We no longer create our own UART event task or consume an event queue.
+  // Wake the driver reader per byte — the reader task blocks in
+  // uart_read_bytes(), so this is what bounds our answer latency.
   esp_err_t err = uart_set_rx_full_threshold(uart_num, 1);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "uart_set_rx_full_threshold failed: %s", esp_err_to_name(err));
@@ -34,7 +35,17 @@ void LinBusListener::setup_framework() {
     ESP_LOGW(TAG, "uart_set_rx_timeout failed: %s", esp_err_to_name(err));
   }
 
-  ESP_LOGCONFIG(TAG, "UART configured for loop-driven RX processing");
+  // PATCH #6: dedicated reader task (see LinBusListener.h). Priority above
+  // the ESPHome main loop so LIN answers preempt housekeeping; pinned to
+  // core 1 to stay clear of the WiFi stack on core 0. 8 KB stack: the task
+  // runs the frame parser, the app-layer answer builder, and ESP_LOG calls.
+  BaseType_t ok = xTaskCreatePinnedToCore(LinBusListener::read_task_trampoline, "truma_lin", 8192, this,
+                                          /* priority */ 12, &this->read_task_handle_, /* core */ 1);
+  if (ok != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create LIN reader task — falling back to nothing; bus will be deaf!");
+  } else {
+    ESP_LOGCONFIG(TAG, "LIN reader task started (core 1, prio 12)");
+  }
 }
 
 }  // namespace truma_inetbox

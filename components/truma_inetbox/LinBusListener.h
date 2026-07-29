@@ -8,6 +8,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #endif  // USE_ESP32
 
 #ifndef TRUMA_MSG_QUEUE_LENGTH
@@ -103,10 +104,24 @@ class LinBusListener : public PollingComponent, public uart::UARTDevice {
     memset(this->current_data_, 0, sizeof(this->current_data_));
   };
 
-  void on_receive_();
-  void read_lin_frame_();
+  void read_lin_frame_(uint8_t buf);
   void clear_uart_buffer_();
   void setup_framework();
+
+#ifdef USE_ESP32
+  // LOCAL PATCH #6 (reliability): dedicated high-priority reader task. LIN is
+  // a hard-real-time slave protocol — the CP Plus expects answers to start
+  // within ~1 ms of the PID, which loop()-driven RX can only meet by luck
+  // (main-loop latency is 7 ms nominal with much larger stalls). The task
+  // blocks directly on the IDF UART driver and runs the state machine +
+  // answer path with deterministic latency; loop() keeps draining the
+  // existing msg/log queues. This restores upstream's original event-task
+  // architecture on the modern (2026.x) UART API.
+  static void read_task_trampoline(void *param);
+  void read_task_loop_();
+  TaskHandle_t read_task_handle_{nullptr};
+  int uart_num_{-1};
+#endif  // USE_ESP32
 
   uint8_t lin_msg_static_queue_storage[TRUMA_MSG_QUEUE_LENGTH * sizeof(QUEUE_LIN_MSG)];
   StaticQueue_t lin_msg_static_queue_;
