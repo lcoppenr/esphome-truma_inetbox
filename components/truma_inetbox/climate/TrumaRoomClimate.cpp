@@ -5,7 +5,24 @@ namespace esphome {
 namespace truma_inetbox {
 
 static const char *const TAG = "truma_inetbox.room_climate";
+
+// LOCAL PATCH: persist the saved setpoint across ESP reboots. Saved only on
+// an actual value change (setpoint changes are rare) to spare flash wear.
+void TrumaRoomClimate::set_saved_target_(float target) {
+  if (!(target >= 5.0f && target <= 30.0f) || target == this->saved_target_) {
+    return;
+  }
+  this->saved_target_ = target;
+  this->saved_target_pref_.save(&this->saved_target_);
+}
+
 void TrumaRoomClimate::setup() {
+  this->saved_target_pref_ = global_preferences->make_preference<float>(this->get_object_id_hash());
+  float restored;
+  if (this->saved_target_pref_.load(&restored) && restored >= 5.0f && restored <= 30.0f) {
+    this->saved_target_ = restored;
+  }
+
   this->parent_->get_heater()->add_on_message_callback([this](const StatusFrameHeater *status_heater) {
     // Publish updated state. While the heater is off the CP Plus reports no
     // target (TARGET_TEMP_OFF -> NaN); keep publishing the saved setpoint so
@@ -13,7 +30,7 @@ void TrumaRoomClimate::setup() {
     float reported_target = temp_code_to_decimal(status_heater->target_temp_room);
     bool heater_off = std::isnan(reported_target);
     if (!heater_off) {
-      this->saved_target_ = reported_target;
+      this->set_saved_target_(reported_target);
     }
     this->target_temperature = heater_off ? this->saved_target_ : reported_target;
     this->current_temperature = temp_code_to_decimal(status_heater->current_temp_room);
@@ -57,7 +74,7 @@ void TrumaRoomClimate::dump_config() { LOG_CLIMATE(TAG, "Truma Room Climate", th
 void TrumaRoomClimate::control(const climate::ClimateCall &call) {
   if (call.get_target_temperature().has_value() && !call.get_fan_mode().has_value()) {
     float temp = *call.get_target_temperature();
-    this->saved_target_ = temp;
+    this->set_saved_target_(temp);
     auto status_heater = this->parent_->get_heater()->get_status();
     bool heater_off = status_heater->target_temp_room == TargetTemp::TARGET_TEMP_OFF;
     bool wants_heat = call.get_mode().has_value() && *call.get_mode() == climate::CLIMATE_MODE_HEAT;
@@ -102,7 +119,7 @@ void TrumaRoomClimate::control(const climate::ClimateCall &call) {
     }
     if (call.get_target_temperature().has_value()) {
       temp = *call.get_target_temperature();
-      this->saved_target_ = temp;
+      this->set_saved_target_(temp);
     }
     switch (fan_mode) {
       case climate::CLIMATE_FAN_LOW:

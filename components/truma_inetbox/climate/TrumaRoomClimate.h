@@ -3,6 +3,7 @@
 #include <set>
 #include "esphome/components/climate/climate.h"
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/truma_inetbox/TrumaiNetBoxApp.h"
 
 namespace esphome {
@@ -30,9 +31,12 @@ namespace esphome {
     float visual_temperature_step_{0.5};
     // Last known/requested room setpoint (°C). Published while the heater is
     // off so HA always has a target (real-thermostat behavior); used to resume
-    // heating at the previous setpoint instead of the 5°C minimum. Not
-    // persisted: resets to 21°C after an ESP reboot until the next heat cycle.
+    // heating at the previous setpoint instead of the 5°C minimum. Persisted
+    // via ESPHome preferences (flash), so it survives ESP reboots; written
+    // only when the value actually changes to spare flash wear.
     float saved_target_{21.0f};
+    ESPPreferenceObject saved_target_pref_;
+    void set_saved_target_(float target);
   };
   
   }  // namespace truma_inetbox
